@@ -1,0 +1,65 @@
+{
+  "$schema": "https://example.com/anyo/world-0.6.schema.json",
+  "version": "0.6",
+  "assets": {
+    "hero": {
+      "type": "animated-model",
+      "format": "glb",
+      "src": "/models/hero.glb",
+      "preload": true
+    }
+  },
+  "building": { "floors": [] },
+  "entities": [
+    {
+      "id": "hero",
+      "type": "model",
+      "asset": "hero",
+      "position": [0, 0, 0],
+      "components": [
+        {
+          "type": "anyo.animation",
+          "clips": {
+            "idle": "Idle",
+            "walk": "Walk",
+            "run": "Run",
+            "jump": "Jump"
+          },
+          "autoplay": true,
+          "parameters": {
+            "speed": { "type": "number", "default": 0, "min": 0, "max": 5 },
+            "grounded": { "type": "boolean", "default": true },
+            "jump": { "type": "trigger" }
+          },
+          "stateMachine": {
+            "initial": "idle",
+            "states": {
+              "idle": { "clip": "idle" },
+              "walk": { "clip": "walk" },
+              "run": { "clip": "run" },
+              "jump": { "clip": "jump", "loop": "once" }
+            },
+            "transitions": [
+              { "from": "idle", "to": "walk", "when": { "speed": { "greaterThan": 0.1 } }, "duration": 0.2 },
+              { "from": "walk", "to": "run", "when": { "speed": { "greaterThan": 2.5 } }, "duration": 0.2 },
+              { "from": "run", "to": "walk", "when": { "speed": { "lessThanOrEqual": 2.5 } }, "duration": 0.2 },
+              { "from": "walk", "to": "idle", "when": { "speed": { "lessThanOrEqual": 0.1 } }, "duration": 0.2 },
+              { "from": "*", "to": "jump", "when": { "jump": { "triggered": true } }, "priority": 100, "duration": 0.1 },
+              { "from": "jump", "to": "idle", "exitTime": 1, "duration": 0.15 }
+            ]
+          },
+          "markers": {
+            "footstep-left": { "action": "audio.play", "params": { "clip": "footstep-left" } },
+            "footstep-right": { "action": "audio.play", "params": { "clip": "footstep-right" } }
+          },
+          "rootMotion": {
+            "mode": "horizontal-only",
+            "node": "Hips",
+            "source": "anyo:animation:root-motion",
+            "priority": 20
+          }
+        }
+      ]
+    }
+  ]
+}

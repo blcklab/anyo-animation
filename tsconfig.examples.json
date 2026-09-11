@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@blcklab/anyo-animation": [
+        "src/index.ts"
+      ],
+      "@blcklab/anyo-animation/authoring": [
+        "src/authoring/index.ts"
+      ],
+      "@blcklab/anyo-animation/sekai64": [
+        "src/sekai64/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "examples/**/*.ts"
+  ]
+}
