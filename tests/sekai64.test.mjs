@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { Sekai64AnimationAdapter } from '../dist/esm/sekai64/index.js'
+import { Sekai64AnimationAdapter, createSekai64AnimationIntegration } from '../dist/esm/sekai64/index.js'
+import { GltfLoader } from '@blcklab/sekai64/gltf'
+import { createAnimationRendererModule, createGltfAnimationAdapter } from '@blcklab/sekai64/animation'
 
 function animatedGltfDataUri() {
   const bytes = new Uint8Array(68)
@@ -117,4 +119,77 @@ test('extracts root motion without leaving translation on the animated model nod
   const delta = binding.consumeRootMotion()
   assert.ok(Math.abs(delta[1] - 1) < 1e-6)
   binding.dispose(); model.dispose(); loader.dispose?.()
+})
+
+
+test('binds an animated model loaded by another loader when both share the renderer animation module', async () => {
+  const module = createAnimationRendererModule()
+  let moduleInstallCalls = 0
+  let externalModel
+  let progressListener
+  const engine = {
+    modules: { has: (id) => id === module.id },
+    async installModules() { moduleInstallCalls += 1 },
+  }
+  await module.setup({
+    renderer: { backend: 'webgl2' },
+    diagnostics: { report() {} },
+    registerCleanup() { return () => {} },
+  })
+  const renderer = {
+    getNativeAccess() {
+      return {
+        engine,
+        scene: {},
+        camera: {},
+        getPrimitiveNode(id) { return id === 'hero:model' ? externalModel : undefined },
+        getRoomNode() {},
+      }
+    },
+    onAssetProgress(listener) { progressListener = listener; return () => { progressListener = undefined } },
+  }
+
+  const adapter = new Sekai64AnimationAdapter({ module })
+  let availabilityChanges = 0
+  adapter.onAvailabilityChange(() => { availabilityChanges += 1 })
+  await adapter.setup({ renderer })
+  assert.equal(moduleInstallCalls, 0, 'a renderer-installed shared module must not be installed twice')
+
+  const externalLoader = new GltfLoader()
+  externalModel = await externalLoader.loadNode(animatedGltfDataUri(), {
+    id: 'hero:model',
+    name: 'hero:model',
+    animation: createGltfAnimationAdapter(module, { createMixer: true }),
+    animatedFallback: 'error',
+  })
+  progressListener?.({ queued: 0, loading: 0, loaded: 1, failed: 0, total: 1, ratio: 1 })
+  assert.equal(availabilityChanges, 1)
+
+  const binding = adapter.attachEntity({
+    entity: { id: 'hero' },
+    primitiveIds: ['hero:model'],
+    config: { clips: { bounce: 'Bounce' }, defaultClip: 'bounce', autoplay: true, loop: 'repeat', speed: 1, parameters: {}, markers: [], rootMotion: { mode: 'disabled', source: 'anyo:animation:root-motion', priority: 20 } },
+    context: { renderer },
+  })
+  assert.ok(binding, 'animation must discover a compatible runtime model outside its own loader')
+  binding.play({ clip: 'bounce', loop: 'repeat', speed: 1 })
+  adapter.update(0.5)
+  let animatedNode
+  externalModel.traverse((candidate) => { if (candidate.name === 'AnimatedNode') animatedNode = candidate })
+  assert.ok(animatedNode)
+  assert.ok(Math.abs(animatedNode.position.y - 1) < 1e-6)
+
+  binding.dispose()
+  externalModel.dispose()
+  externalLoader.dispose()
+  adapter.dispose()
+})
+
+test('creates a Player-ready Sekai64 animation composition bundle', () => {
+  const integration = createSekai64AnimationIntegration()
+  assert.equal(integration.module.id, 'sekai64.animation')
+  assert.equal(integration.assetLoader.type, 'animated-model')
+  assert.deepEqual(integration.assetLoader.formats, ['gltf', 'glb'])
+  assert.equal(integration.plugin.name, 'anyo:animation')
+  integration.adapter.dispose()
 })

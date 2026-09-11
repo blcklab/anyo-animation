@@ -34,7 +34,8 @@ interface LoadedAnimatedModel {
 }
 
 export interface Sekai64AnimationAdapterOptions {
-  readonly getRenderer: () => Sekai64Renderer
+  /** Optional explicit renderer resolver. When omitted, the adapter uses the renderer from PluginRuntimeContext. */
+  readonly getRenderer?: () => Sekai64Renderer
   readonly assetType?: string
   readonly module?: AnimationRendererModule
   readonly moduleOptions?: AnimationRendererModuleOptions
@@ -49,6 +50,7 @@ export class Sekai64AnimationAdapter implements AnimationRuntimeAdapter {
   private readonly bindings = new Set<Sekai64AnimationEntityBinding>()
   private moduleInstall: Promise<void> | null = null
   private context: PluginRuntimeContext | null = null
+  private assetCleanup: (() => void) | null = null
   private active = true
 
   constructor(private readonly options: Sekai64AnimationAdapterOptions) {
@@ -60,11 +62,13 @@ export class Sekai64AnimationAdapter implements AnimationRuntimeAdapter {
     this.context = context
     this.active = true
     await this.ensureModule()
+    this.assetCleanup?.()
+    this.assetCleanup = this.renderer().onAssetProgress?.(() => this.notify()) ?? null
   }
 
   attachEntity(request: AnimationAttachRequest): AnimationEntityBinding | null {
     for (const primitiveId of request.primitiveIds) {
-      const loaded = this.loaded.get(primitiveId)
+      const loaded = this.resolveAnimatedModel(primitiveId)
       if (!loaded) continue
       const binding = new Sekai64AnimationEntityBinding(
         request.entity.id,
@@ -108,6 +112,8 @@ export class Sekai64AnimationAdapter implements AnimationRuntimeAdapter {
 
   dispose(): void {
     this.active = false
+    this.assetCleanup?.()
+    this.assetCleanup = null
     for (const binding of [...this.bindings]) binding.dispose()
     this.bindings.clear()
     this.loaded.clear()
@@ -153,9 +159,10 @@ export class Sekai64AnimationAdapter implements AnimationRuntimeAdapter {
     if (this.moduleInstall) return this.moduleInstall
     this.moduleInstall = (async () => {
       const native = this.nativeAccess()
-      if (native.engine.modules.has(this.module.id)) {
-        throw new Error(`Sekai64 module "${this.module.id}" is already installed by another owner.`)
-      }
+      // Player may install this exact module through renderer.modules before the
+      // world plugins are set up. Reusing that renderer-owned installation is
+      // required so GLB and VRM loaders can share one skinning/mixer module.
+      if (native.engine.modules.has(this.module.id)) return
       await native.engine.installModules([this.module])
     })()
     try {
@@ -166,9 +173,29 @@ export class Sekai64AnimationAdapter implements AnimationRuntimeAdapter {
     }
   }
 
+  private resolveAnimatedModel(primitiveId: string): LoadedAnimatedModel | null {
+    const owned = this.loaded.get(primitiveId)
+    if (owned && !owned.model.disposed && !owned.model.asset.disposed) return owned
+
+    const node = this.nativeAccess().getPrimitiveNode(primitiveId)
+    if (!(node instanceof GltfModelNode) || node.disposed || node.asset.disposed) return null
+    const animation = node.asset.getExtension<GltfAnimationSet>(GLTF_ANIMATION_EXTENSION_ID)
+    if (!animation?.mixer || animation.clips.length === 0) return null
+    return { primitiveId, model: node, animation }
+  }
+
+  private renderer(): Sekai64Renderer {
+    const explicit = this.options.getRenderer?.()
+    if (explicit) return explicit
+    const renderer = this.context?.renderer as Partial<Sekai64Renderer> | undefined
+    if (!renderer || typeof renderer.getNativeAccess !== 'function') {
+      throw new Error('Sekai64 animation requires a Sekai64Renderer in the plugin runtime context.')
+    }
+    return renderer as Sekai64Renderer
+  }
+
   private nativeAccess(): Sekai64RendererNativeAccess {
-    const renderer = this.options.getRenderer()
-    const native = renderer.getNativeAccess()
+    const native = this.renderer().getNativeAccess()
     if (!native) throw new Error('Sekai64 animation requires a mounted Sekai64Renderer native scene.')
     return native
   }

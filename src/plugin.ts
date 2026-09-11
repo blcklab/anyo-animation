@@ -33,16 +33,16 @@ export class AnyoAnimationPlugin implements WorldPlugin {
     this.controller.reconcile(context)
   }
 
+  /** Releases bindings/listeners for the current world document while keeping the adapter reusable. */
+  teardown(): void { this.teardownRuntime() }
+
+  /** Permanently releases the plugin and its renderer adapter. */
   dispose(): void { void this.disposeAsync() }
 
   async disposeAsync(): Promise<void> {
     if (this.pendingDispose) return this.pendingDispose
     this.pendingDispose = (async () => {
-      this.activeContext = null
-      this.availabilityCleanup?.()
-      this.availabilityCleanup = null
-      for (const cleanup of this.cleanups.splice(0)) cleanup()
-      this.controller.dispose()
+      this.teardownRuntime()
       await this.options.adapter.dispose?.()
     })()
     return this.pendingDispose
@@ -72,6 +72,15 @@ export class AnyoAnimationPlugin implements WorldPlugin {
   stopAll(): void { this.controller.stopAll() }
   get(...args: Parameters<AnimationController['get']>): ReturnType<AnimationController['get']> { return this.controller.get(...args) }
   list(): ReturnType<AnimationController['list']> { return this.controller.list() }
+
+
+  private teardownRuntime(): void {
+    this.activeContext = null
+    this.availabilityCleanup?.()
+    this.availabilityCleanup = null
+    for (const cleanup of this.cleanups.splice(0)) cleanup()
+    this.controller.dispose()
+  }
 
   private bindHostLifecycle(context: PluginRuntimeContext): void {
     for (const cleanup of this.cleanups.splice(0)) cleanup()

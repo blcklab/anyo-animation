@@ -1,3 +1,11 @@
+## 0.1.2
+
+- Added loader-independent Sekai64 animation binding so `anyo.animation` can control compatible animated GLB/VRM runtime models created by another asset loader.
+- Added `createSekai64AnimationIntegration()` for host/player composition around one shared Sekai64 animation module.
+- Reuse an already-installed `sekai64.animation` module, allowing the Anyo Player and VRM loader to share skinning/mixer state without a duplicate-module error.
+- Added Anyo 0.10 world `teardown()` handling so world replacement releases per-world bindings without permanently disposing the reusable adapter.
+- Kept all existing 0.1.x APIs, component JSON, asset type defaults, and peer ranges compatible.
+
 ## 0.1.1
 
 - Publish-prep: accept Anyo 0.10 prereleases in the peer range.
