@@ -1,0 +1,414 @@
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@blcklab/anyo-animation",
+-  "version": "0.1.1",
++  "version": "0.1.2",
+   "description": "Optional renderer-neutral animation runtime for Anyo with parameters, state machines, events, root motion, authoring contracts, and an explicit Sekai64 adapter.",
+   "keywords": [
+     "anyo",
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,3 +1,11 @@
++## 0.1.2
++
++- Added loader-independent Sekai64 animation binding so `anyo.animation` can control compatible animated GLB/VRM runtime models created by another asset loader.
++- Added `createSekai64AnimationIntegration()` for host/player composition around one shared Sekai64 animation module.
++- Reuse an already-installed `sekai64.animation` module, allowing the Anyo Player and VRM loader to share skinning/mixer state without a duplicate-module error.
++- Added Anyo 0.10 world `teardown()` handling so world replacement releases per-world bindings without permanently disposing the reusable adapter.
++- Kept all existing 0.1.x APIs, component JSON, asset type defaults, and peer ranges compatible.
++
+ ## 0.1.1
+ 
+ - Publish-prep: accept Anyo 0.10 prereleases in the peer range.
+--- a/README.md
++++ b/README.md
+@@ -53,6 +53,29 @@
+ 
+ The Sekai64 integration installs its optional animation renderer module lazily and registers the explicit `animated-model` asset loader. Static Anyo projects remain unchanged.
+ 
++### Player / shared VRM integration
++
++Hosts that install renderer modules directly can use `createSekai64AnimationIntegration()` and pass the same `module` to the Avatar VRM loader. The animation adapter can then bind a compatible animated `GltfModelNode` even when that model was loaded by the VRM loader rather than by Animation's own `animated-model` loader.
++
++```ts
++import { createSekai64AnimationIntegration } from '@blcklab/anyo-animation/sekai64'
++import { createSekai64VrmAssetLoader } from '@blcklab/anyo-avatar/vrm/sekai64'
++
++const animation = createSekai64AnimationIntegration()
++
++const renderer = {
++  modules: [animation.module],
++  assetLoaders: [
++    animation.assetLoader,
++    createSekai64VrmAssetLoader({ animationModule: animation.module }),
++  ],
++}
++
++const plugins = [animation.plugin]
++```
++
++This is additive: `createSekai64AnimationRuntime()` and the existing `animated-model` workflow remain supported.
++
+ ## Authored component
+ 
+ ```json
+--- a/scripts/verify-stable.mjs
++++ b/scripts/verify-stable.mjs
+@@ -2,7 +2,7 @@
+ import { readFile } from 'node:fs/promises'
+ 
+ const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+-assert.equal(pkg.version, '0.1.1')
++assert.equal(pkg.version, '0.1.2')
+ assert.equal(pkg.version.includes('-'), false, 'Stable version must not contain a prerelease identifier.')
+ assert.ok(pkg.exports['./sekai64'])
+ assert.ok(pkg.exports['./authoring'])
+--- a/src/version.ts
++++ b/src/version.ts
+@@ -1,2 +1,2 @@
+ /** Generated from package.json. Do not edit manually. */
+-export const ANYO_ANIMATION_VERSION = "0.1.1" as const
++export const ANYO_ANIMATION_VERSION = "0.1.2" as const
+--- a/src/plugin.ts
++++ b/src/plugin.ts
+@@ -33,16 +33,16 @@
+     this.controller.reconcile(context)
+   }
+ 
++  /** Releases bindings/listeners for the current world document while keeping the adapter reusable. */
++  teardown(): void { this.teardownRuntime() }
++
++  /** Permanently releases the plugin and its renderer adapter. */
+   dispose(): void { void this.disposeAsync() }
+ 
+   async disposeAsync(): Promise<void> {
+     if (this.pendingDispose) return this.pendingDispose
+     this.pendingDispose = (async () => {
+-      this.activeContext = null
+-      this.availabilityCleanup?.()
+-      this.availabilityCleanup = null
+-      for (const cleanup of this.cleanups.splice(0)) cleanup()
+-      this.controller.dispose()
++      this.teardownRuntime()
+       await this.options.adapter.dispose?.()
+     })()
+     return this.pendingDispose
+@@ -73,6 +73,15 @@
+   get(...args: Parameters<AnimationController['get']>): ReturnType<AnimationController['get']> { return this.controller.get(...args) }
+   list(): ReturnType<AnimationController['list']> { return this.controller.list() }
+ 
++
++  private teardownRuntime(): void {
++    this.activeContext = null
++    this.availabilityCleanup?.()
++    this.availabilityCleanup = null
++    for (const cleanup of this.cleanups.splice(0)) cleanup()
++    this.controller.dispose()
++  }
++
+   private bindHostLifecycle(context: PluginRuntimeContext): void {
+     for (const cleanup of this.cleanups.splice(0)) cleanup()
+     const world = context.world
+--- a/src/sekai64/Sekai64AnimationAdapter.ts
++++ b/src/sekai64/Sekai64AnimationAdapter.ts
+@@ -34,7 +34,8 @@
+ }
+ 
+ export interface Sekai64AnimationAdapterOptions {
+-  readonly getRenderer: () => Sekai64Renderer
++  /** Optional explicit renderer resolver. When omitted, the adapter uses the renderer from PluginRuntimeContext. */
++  readonly getRenderer?: () => Sekai64Renderer
+   readonly assetType?: string
+   readonly module?: AnimationRendererModule
+   readonly moduleOptions?: AnimationRendererModuleOptions
+@@ -49,6 +50,7 @@
+   private readonly bindings = new Set<Sekai64AnimationEntityBinding>()
+   private moduleInstall: Promise<void> | null = null
+   private context: PluginRuntimeContext | null = null
++  private assetCleanup: (() => void) | null = null
+   private active = true
+ 
+   constructor(private readonly options: Sekai64AnimationAdapterOptions) {
+@@ -60,11 +62,13 @@
+     this.context = context
+     this.active = true
+     await this.ensureModule()
++    this.assetCleanup?.()
++    this.assetCleanup = this.renderer().onAssetProgress?.(() => this.notify()) ?? null
+   }
+ 
+   attachEntity(request: AnimationAttachRequest): AnimationEntityBinding | null {
+     for (const primitiveId of request.primitiveIds) {
+-      const loaded = this.loaded.get(primitiveId)
++      const loaded = this.resolveAnimatedModel(primitiveId)
+       if (!loaded) continue
+       const binding = new Sekai64AnimationEntityBinding(
+         request.entity.id,
+@@ -108,6 +112,8 @@
+ 
+   dispose(): void {
+     this.active = false
++    this.assetCleanup?.()
++    this.assetCleanup = null
+     for (const binding of [...this.bindings]) binding.dispose()
+     this.bindings.clear()
+     this.loaded.clear()
+@@ -153,9 +159,10 @@
+     if (this.moduleInstall) return this.moduleInstall
+     this.moduleInstall = (async () => {
+       const native = this.nativeAccess()
+-      if (native.engine.modules.has(this.module.id)) {
+-        throw new Error(`Sekai64 module "${this.module.id}" is already installed by another owner.`)
+-      }
++      // Player may install this exact module through renderer.modules before the
++      // world plugins are set up. Reusing that renderer-owned installation is
++      // required so GLB and VRM loaders can share one skinning/mixer module.
++      if (native.engine.modules.has(this.module.id)) return
+       await native.engine.installModules([this.module])
+     })()
+     try {
+@@ -166,9 +173,29 @@
+     }
+   }
+ 
++  private resolveAnimatedModel(primitiveId: string): LoadedAnimatedModel | null {
++    const owned = this.loaded.get(primitiveId)
++    if (owned && !owned.model.disposed && !owned.model.asset.disposed) return owned
++
++    const node = this.nativeAccess().getPrimitiveNode(primitiveId)
++    if (!(node instanceof GltfModelNode) || node.disposed || node.asset.disposed) return null
++    const animation = node.asset.getExtension<GltfAnimationSet>(GLTF_ANIMATION_EXTENSION_ID)
++    if (!animation?.mixer || animation.clips.length === 0) return null
++    return { primitiveId, model: node, animation }
++  }
++
++  private renderer(): Sekai64Renderer {
++    const explicit = this.options.getRenderer?.()
++    if (explicit) return explicit
++    const renderer = this.context?.renderer as Partial<Sekai64Renderer> | undefined
++    if (!renderer || typeof renderer.getNativeAccess !== 'function') {
++      throw new Error('Sekai64 animation requires a Sekai64Renderer in the plugin runtime context.')
++    }
++    return renderer as Sekai64Renderer
++  }
++
+   private nativeAccess(): Sekai64RendererNativeAccess {
+-    const renderer = this.options.getRenderer()
+-    const native = renderer.getNativeAccess()
++    const native = this.renderer().getNativeAccess()
+     if (!native) throw new Error('Sekai64 animation requires a mounted Sekai64Renderer native scene.')
+     return native
+   }
+--- a/src/sekai64/factory.ts
++++ b/src/sekai64/factory.ts
+@@ -2,6 +2,9 @@
+   Sekai64Renderer,
+   type Sekai64RendererOptions,
+ } from '@blcklab/anyo/renderer-sekai64'
++import type { AssetLoaderRegistration } from '@blcklab/sekai64/assets'
++import type { GltfModelNode } from '@blcklab/sekai64/gltf'
++import type { AnimationRendererModule } from '@blcklab/sekai64/animation'
+ import type { AnimationPluginOptions } from '../types.js'
+ import { createAnimationPlugin, type AnyoAnimationPlugin } from '../plugin.js'
+ import {
+@@ -9,6 +12,49 @@
+   type Sekai64AnimationAdapterOptions,
+ } from './Sekai64AnimationAdapter.js'
+ 
++
++export interface CreateSekai64AnimationIntegrationOptions
++  extends Pick<AnimationPluginOptions, 'onDiagnostic' | 'strict'> {
++  readonly assetType?: string
++  readonly animationModule?: Sekai64AnimationAdapterOptions['module']
++  readonly animationModuleOptions?: Sekai64AnimationAdapterOptions['moduleOptions']
++}
++
++/**
++ * Composition bundle for hosts such as @blcklab/anyo-player.
++ *
++ * Install `module` through the renderer, `assetLoader` through renderer asset
++ * loaders, and `plugin` through Anyo world plugins. A VRM loader can reuse the
++ * same `module` so VRM skinning and anyo.animation share one runtime.
++ */
++export interface Sekai64AnimationIntegration {
++  readonly module: AnimationRendererModule
++  readonly adapter: Sekai64AnimationAdapter
++  readonly assetLoader: AssetLoaderRegistration<GltfModelNode>
++  readonly plugin: AnyoAnimationPlugin
++}
++
++export function createSekai64AnimationIntegration(
++  options: CreateSekai64AnimationIntegrationOptions = {},
++): Sekai64AnimationIntegration {
++  const adapter = new Sekai64AnimationAdapter({
++    ...(options.assetType ? { assetType: options.assetType } : {}),
++    ...(options.animationModule ? { module: options.animationModule } : {}),
++    ...(options.animationModuleOptions ? { moduleOptions: options.animationModuleOptions } : {}),
++  })
++  const plugin = createAnimationPlugin({
++    adapter,
++    ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
++    ...(options.strict !== undefined ? { strict: options.strict } : {}),
++  })
++  return Object.freeze({
++    module: adapter.module,
++    adapter,
++    assetLoader: adapter.createAssetLoader(),
++    plugin,
++  })
++}
++
+ export interface CreateSekai64AnimationRuntimeOptions
+   extends Omit<Sekai64RendererOptions, 'assetLoaders'>,
+     Pick<AnimationPluginOptions, 'onDiagnostic' | 'strict'> {
+@@ -34,24 +80,23 @@
+     animationModuleOptions,
+     onDiagnostic,
+     strict,
++    modules = [],
+     ...rendererOptions
+   } = options
+ 
+-  let renderer!: Sekai64Renderer
+-  const adapter = new Sekai64AnimationAdapter({
+-    getRenderer: () => renderer,
++  const integration = createSekai64AnimationIntegration({
+     ...(assetType ? { assetType } : {}),
+-    ...(animationModule ? { module: animationModule } : {}),
+-    ...(animationModuleOptions ? { moduleOptions: animationModuleOptions } : {}),
+-  })
+-  renderer = new Sekai64Renderer({
+-    ...rendererOptions,
+-    assetLoaders: [...assetLoaders, adapter.createAssetLoader()],
+-  })
+-  const plugin = createAnimationPlugin({
+-    adapter,
++    ...(animationModule ? { animationModule } : {}),
++    ...(animationModuleOptions ? { animationModuleOptions } : {}),
+     ...(onDiagnostic ? { onDiagnostic } : {}),
+     ...(strict !== undefined ? { strict } : {}),
+   })
+-  return Object.freeze({ renderer, adapter, plugin })
++  const rendererModules = [...modules]
++  if (!rendererModules.some((module) => module.id === integration.module.id)) rendererModules.push(integration.module)
++  const renderer = new Sekai64Renderer({
++    ...rendererOptions,
++    modules: rendererModules,
++    assetLoaders: [...assetLoaders, integration.assetLoader],
++  })
++  return Object.freeze({ renderer, adapter: integration.adapter, plugin: integration.plugin })
+ }
+--- a/tests/sekai64.test.mjs
++++ b/tests/sekai64.test.mjs
+@@ -1,6 +1,8 @@
+ import test from 'node:test'
+ import assert from 'node:assert/strict'
+-import { Sekai64AnimationAdapter } from '../dist/esm/sekai64/index.js'
++import { Sekai64AnimationAdapter, createSekai64AnimationIntegration } from '../dist/esm/sekai64/index.js'
++import { GltfLoader } from '@blcklab/sekai64/gltf'
++import { createAnimationRendererModule, createGltfAnimationAdapter } from '@blcklab/sekai64/animation'
+ 
+ function animatedGltfDataUri() {
+   const bytes = new Uint8Array(68)
+@@ -118,3 +120,76 @@
+   assert.ok(Math.abs(delta[1] - 1) < 1e-6)
+   binding.dispose(); model.dispose(); loader.dispose?.()
+ })
++
++
++test('binds an animated model loaded by another loader when both share the renderer animation module', async () => {
++  const module = createAnimationRendererModule()
++  let moduleInstallCalls = 0
++  let externalModel
++  let progressListener
++  const engine = {
++    modules: { has: (id) => id === module.id },
++    async installModules() { moduleInstallCalls += 1 },
++  }
++  await module.setup({
++    renderer: { backend: 'webgl2' },
++    diagnostics: { report() {} },
++    registerCleanup() { return () => {} },
++  })
++  const renderer = {
++    getNativeAccess() {
++      return {
++        engine,
++        scene: {},
++        camera: {},
++        getPrimitiveNode(id) { return id === 'hero:model' ? externalModel : undefined },
++        getRoomNode() {},
++      }
++    },
++    onAssetProgress(listener) { progressListener = listener; return () => { progressListener = undefined } },
++  }
++
++  const adapter = new Sekai64AnimationAdapter({ module })
++  let availabilityChanges = 0
++  adapter.onAvailabilityChange(() => { availabilityChanges += 1 })
++  await adapter.setup({ renderer })
++  assert.equal(moduleInstallCalls, 0, 'a renderer-installed shared module must not be installed twice')
++
++  const externalLoader = new GltfLoader()
++  externalModel = await externalLoader.loadNode(animatedGltfDataUri(), {
++    id: 'hero:model',
++    name: 'hero:model',
++    animation: createGltfAnimationAdapter(module, { createMixer: true }),
++    animatedFallback: 'error',
++  })
++  progressListener?.({ queued: 0, loading: 0, loaded: 1, failed: 0, total: 1, ratio: 1 })
++  assert.equal(availabilityChanges, 1)
++
++  const binding = adapter.attachEntity({
++    entity: { id: 'hero' },
++    primitiveIds: ['hero:model'],
++    config: { clips: { bounce: 'Bounce' }, defaultClip: 'bounce', autoplay: true, loop: 'repeat', speed: 1, parameters: {}, markers: [], rootMotion: { mode: 'disabled', source: 'anyo:animation:root-motion', priority: 20 } },
++    context: { renderer },
++  })
++  assert.ok(binding, 'animation must discover a compatible runtime model outside its own loader')
++  binding.play({ clip: 'bounce', loop: 'repeat', speed: 1 })
++  adapter.update(0.5)
++  let animatedNode
++  externalModel.traverse((candidate) => { if (candidate.name === 'AnimatedNode') animatedNode = candidate })
++  assert.ok(animatedNode)
++  assert.ok(Math.abs(animatedNode.position.y - 1) < 1e-6)
++
++  binding.dispose()
++  externalModel.dispose()
++  externalLoader.dispose()
++  adapter.dispose()
++})
++
++test('creates a Player-ready Sekai64 animation composition bundle', () => {
++  const integration = createSekai64AnimationIntegration()
++  assert.equal(integration.module.id, 'sekai64.animation')
++  assert.equal(integration.assetLoader.type, 'animated-model')
++  assert.deepEqual(integration.assetLoader.formats, ['gltf', 'glb'])
++  assert.equal(integration.plugin.name, 'anyo:animation')
++  integration.adapter.dispose()
++})
+--- a/tests/stable.test.mjs
++++ b/tests/stable.test.mjs
+@@ -203,3 +203,20 @@
+   assert.deepEqual(validateAnimationComponentData(definition), [])
+   assert.deepEqual(listAnimationClipReferences(config), ['Idle', 'Jump', 'Walk', 'idle', 'jump', 'walk'])
+ })
++
++
++test('world teardown keeps the animation adapter reusable until final plugin disposal', async () => {
++  const fixture = createStableFixture()
++  let adapterDisposeCalls = 0
++  fixture.adapter.dispose = () => { adapterDisposeCalls += 1 }
++  const plugin = createAnimationPlugin({ adapter: fixture.adapter })
++
++  await plugin.setup(fixture.context)
++  plugin.teardown(fixture.context)
++  assert.equal(adapterDisposeCalls, 0)
++
++  await plugin.setup(fixture.context)
++  assert.ok(plugin.get('hero'))
++  await plugin.disposeAsync()
++  assert.equal(adapterDisposeCalls, 1)
++})

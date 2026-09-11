@@ -53,6 +53,29 @@ world.start()
 
 The Sekai64 integration installs its optional animation renderer module lazily and registers the explicit `animated-model` asset loader. Static Anyo projects remain unchanged.
 
+### Player / shared VRM integration
+
+Hosts that install renderer modules directly can use `createSekai64AnimationIntegration()` and pass the same `module` to the Avatar VRM loader. The animation adapter can then bind a compatible animated `GltfModelNode` even when that model was loaded by the VRM loader rather than by Animation's own `animated-model` loader.
+
+```ts
+import { createSekai64AnimationIntegration } from '@blcklab/anyo-animation/sekai64'
+import { createSekai64VrmAssetLoader } from '@blcklab/anyo-avatar/vrm/sekai64'
+
+const animation = createSekai64AnimationIntegration()
+
+const renderer = {
+  modules: [animation.module],
+  assetLoaders: [
+    animation.assetLoader,
+    createSekai64VrmAssetLoader({ animationModule: animation.module }),
+  ],
+}
+
+const plugins = [animation.plugin]
+```
+
+This is additive: `createSekai64AnimationRuntime()` and the existing `animated-model` workflow remain supported.
+
 ## Authored component
 
 ```json

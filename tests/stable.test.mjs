@@ -203,3 +203,20 @@ test('provides editor-safe authoring helpers without renderer imports', () => {
   assert.deepEqual(validateAnimationComponentData(definition), [])
   assert.deepEqual(listAnimationClipReferences(config), ['Idle', 'Jump', 'Walk', 'idle', 'jump', 'walk'])
 })
+
+
+test('world teardown keeps the animation adapter reusable until final plugin disposal', async () => {
+  const fixture = createStableFixture()
+  let adapterDisposeCalls = 0
+  fixture.adapter.dispose = () => { adapterDisposeCalls += 1 }
+  const plugin = createAnimationPlugin({ adapter: fixture.adapter })
+
+  await plugin.setup(fixture.context)
+  plugin.teardown(fixture.context)
+  assert.equal(adapterDisposeCalls, 0)
+
+  await plugin.setup(fixture.context)
+  assert.ok(plugin.get('hero'))
+  await plugin.disposeAsync()
+  assert.equal(adapterDisposeCalls, 1)
+})

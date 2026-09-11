@@ -1,6 +1,6 @@
 {
   "name": "@blcklab/anyo-animation",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Optional renderer-neutral animation runtime for Anyo with parameters, state machines, events, root motion, authoring contracts, and an explicit Sekai64 adapter.",
   "keywords": [
     "anyo",
