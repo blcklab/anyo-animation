@@ -28,9 +28,15 @@ import type {
 } from '../types.js'
 
 interface LoadedAnimatedModel {
-  readonly primitiveId: string
   readonly model: GltfModelNode
-  readonly animation: GltfAnimationSet
+  readonly clips: readonly AnimationClip[]
+  readonly restorePose?: () => void
+  readonly isAvailable?: () => boolean
+}
+
+export interface Sekai64ExternalClipOptions {
+  /** Restore the target rig before playback and when playback releases it. */
+  readonly restorePose?: () => void
 }
 
 export interface Sekai64AnimationAdapterOptions {
@@ -46,6 +52,7 @@ export class Sekai64AnimationAdapter implements AnimationRuntimeAdapter {
   readonly module: AnimationRendererModule
   private readonly loader = new GltfLoader()
   private readonly loaded = new Map<string, LoadedAnimatedModel>()
+  private readonly external = new WeakMap<GltfModelNode, LoadedAnimatedModel>()
   private readonly listeners = new Set<() => void>()
   private readonly bindings = new Set<Sekai64AnimationEntityBinding>()
   private moduleInstall: Promise<void> | null = null
@@ -73,16 +80,50 @@ export class Sekai64AnimationAdapter implements AnimationRuntimeAdapter {
       const binding = new Sekai64AnimationEntityBinding(
         request.entity.id,
         loaded.model,
-        loaded.animation,
+        loaded.clips,
         request.config.clips,
         request.config.rootMotion,
         this.module,
+        loaded.restorePose,
+        loaded.isAvailable,
         () => this.bindings.delete(binding),
       )
       this.bindings.add(binding)
       return binding
     }
     return null
+  }
+
+  /**
+   * Register clips prepared by another package (for example a VRMA retargeter)
+   * against an already-loaded Sekai64 model. The caller retains clip ownership.
+   *
+   * This deliberately does not parse or retarget animation data: it is only the
+   * bridge that lets Anyo Animation own playback/state for externally prepared
+   * clips on the existing renderer model.
+   */
+  registerExternalClips(
+    model: GltfModelNode,
+    clips: readonly AnimationClip[],
+    options: Sekai64ExternalClipOptions = {},
+  ): () => void {
+    if (model.disposed || model.asset.disposed) throw new Error('Cannot register animation clips on a disposed Sekai64 model.')
+    if (!clips.length) throw new Error('External animation registration requires at least one clip.')
+    let active = true
+    const entry: LoadedAnimatedModel = Object.freeze({
+      model,
+      clips: Object.freeze([...clips]),
+      ...(options.restorePose ? { restorePose: options.restorePose } : {}),
+      isAvailable: () => active && !model.disposed && !model.asset.disposed,
+    })
+    this.external.set(model, entry)
+    this.notify()
+    return () => {
+      if (!active) return
+      active = false
+      if (this.external.get(model) === entry) this.external.delete(model)
+      this.notify()
+    }
   }
 
   update(deltaSeconds: number): void {
@@ -143,7 +184,7 @@ export class Sekai64AnimationAdapter implements AnimationRuntimeAdapter {
     animation.mixer.stopAll()
     animation.mixer.clearListeners()
     this.module.removeMixer(animation.mixer)
-    const entry: LoadedAnimatedModel = { primitiveId: request.id, model, animation }
+    const entry: LoadedAnimatedModel = { model, clips: animation.clips }
     this.loaded.set(request.id, entry)
     model.asset.onDispose(() => {
       if (this.loaded.get(request.id as string)?.model === model) {
@@ -179,9 +220,11 @@ export class Sekai64AnimationAdapter implements AnimationRuntimeAdapter {
 
     const node = this.nativeAccess().getPrimitiveNode(primitiveId)
     if (!(node instanceof GltfModelNode) || node.disposed || node.asset.disposed) return null
+    const external = this.external.get(node)
+    if (external) return external
     const animation = node.asset.getExtension<GltfAnimationSet>(GLTF_ANIMATION_EXTENSION_ID)
     if (!animation?.mixer || animation.clips.length === 0) return null
-    return { primitiveId, model: node, animation }
+    return { model: node, clips: animation.clips }
   }
 
   private renderer(): Sekai64Renderer {
@@ -221,23 +264,22 @@ class Sekai64AnimationEntityBinding implements AnimationEntityBinding {
   constructor(
     readonly entityId: string,
     private readonly model: GltfModelNode,
-    animation: GltfAnimationSet,
+    clips: readonly AnimationClip[],
     aliases: Readonly<Record<string, string>>,
     rootMotion: AnimationRootMotionConfig,
     private readonly module: AnimationRendererModule,
+    private readonly restorePose: (() => void) | undefined,
+    private readonly sourceAvailable: (() => boolean) | undefined,
     private readonly onDispose: () => void,
   ) {
-    const originalMixer = animation.mixer
-    if (!originalMixer) throw new Error(`Animated entity "${entityId}" has no Sekai64 mixer.`)
-    void originalMixer
     const prepared = rootMotion.mode === 'disabled'
-      ? animation.clips
-      : this.prepareRootMotionClips(animation.clips, rootMotion)
+      ? clips
+      : this.prepareRootMotionClips(clips, rootMotion)
     this.mixer = this.module.createMixer(model, prepared)
 
-    this.availableClips = Object.freeze(animation.clips.flatMap((clip) => clip.name === clip.id ? [clip.id] : [clip.id, clip.name]))
-    for (let index = 0; index < animation.clips.length; index += 1) {
-      const original = animation.clips[index] as AnimationClip
+    this.availableClips = Object.freeze(clips.flatMap((clip) => clip.name === clip.id ? [clip.id] : [clip.id, clip.name]))
+    for (let index = 0; index < clips.length; index += 1) {
+      const original = clips[index] as AnimationClip
       const playable = prepared[index] as AnimationClip
       this.byReference.set(original.id, playable.id)
       this.byReference.set(original.name, playable.id)
@@ -258,12 +300,18 @@ class Sekai64AnimationEntityBinding implements AnimationEntityBinding {
     )
   }
 
-  isAvailable(): boolean { return !this.disposed && !this.model.disposed && !this.model.asset.disposed }
+  isAvailable(): boolean {
+    return !this.disposed
+      && !this.model.disposed
+      && !this.model.asset.disposed
+      && (this.sourceAvailable?.() ?? true)
+  }
 
   play(request: AnimationPlayRequest): void {
     this.assertAlive()
     const clipId = this.resolveClip(request.clip)
     this.mixer.stopAll()
+    this.restorePose?.()
     this.speed = request.speed
     this.action = this.mixer.play(clipId, {
       loop: request.loop,
@@ -294,6 +342,7 @@ class Sekai64AnimationEntityBinding implements AnimationEntityBinding {
     this.action?.stop()
     this.action = null
     this.resetRootMotionCursor()
+    this.restorePose?.()
   }
 
   seek(time: number): void { this.assertAlive(); this.action?.seek(time); this.resetRootMotionCursor() }

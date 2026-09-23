@@ -11,6 +11,33 @@ export type AnimationLoopMode = 'once' | 'repeat' | 'ping-pong'
 export type AnimationParameterType = 'boolean' | 'number' | 'trigger'
 export type AnimationParameterValue = boolean | number
 
+export type AnimationPropertyTrackTarget =
+  | 'transform.position'
+  | 'transform.position.x'
+  | 'transform.position.y'
+  | 'transform.position.z'
+  | 'transform.rotation'
+  | 'transform.rotation.x'
+  | 'transform.rotation.y'
+  | 'transform.rotation.z'
+  | 'transform.scale'
+  | 'transform.scale.x'
+  | 'transform.scale.y'
+  | 'transform.scale.z'
+
+export type AnimationPropertyTrackEasing = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out'
+export type AnimationPropertyTrackValue = number | readonly [number, number, number]
+
+export interface AnimationPropertyTrackConfig {
+  readonly id: string
+  readonly target: AnimationPropertyTrackTarget
+  readonly from: AnimationPropertyTrackValue
+  readonly to: AnimationPropertyTrackValue
+  readonly duration: number
+  readonly loop: AnimationLoopMode
+  readonly easing: AnimationPropertyTrackEasing
+}
+
 export interface AnimationBooleanParameterDefinition {
   readonly type: 'boolean'
   readonly default?: boolean
@@ -112,6 +139,7 @@ export interface AnimationComponentConfig {
   readonly stateMachine?: AnimationStateMachineConfig
   readonly markers: readonly AnimationMarkerBinding[]
   readonly rootMotion: AnimationRootMotionConfig
+  readonly tracks?: readonly AnimationPropertyTrackConfig[]
 }
 
 export type AnimationEntityStatus = 'pending' | 'ready' | 'playing' | 'paused' | 'stopped'
@@ -138,6 +166,7 @@ export interface AnimationEntityRuntimeSnapshot {
   readonly speed: number
   readonly time?: number
   readonly rootMotion: readonly [number, number, number]
+  readonly trackTime?: number
 }
 
 export interface AnimationRuntimeSnapshot {
@@ -157,6 +186,7 @@ export interface AnimationEntitySnapshot {
   readonly transition?: AnimationActiveTransitionSnapshot
   readonly parameters: AnimationParameterSnapshot
   readonly rootMotion: readonly [number, number, number]
+  readonly trackTime: number
 }
 
 export type AnimationDiagnosticCode =

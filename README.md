@@ -313,3 +313,15 @@ Implement `AnimationRuntimeAdapter` and `AnimationEntityBinding`. Crossfades, ev
 ## Stable guarantees
 
 See [Compatibility](docs/COMPATIBILITY.md) for the `0.1.x` compatibility contract.
+
+### Externally prepared clips
+
+Renderer-specific importers/retargeters can prepare Sekai64 `AnimationClip` objects for an already-loaded model and hand playback ownership to Anyo Animation:
+
+```ts
+const unregister = integration.adapter.registerExternalClips(model, clips, {
+  restorePose,
+})
+```
+
+This hook does not parse or retarget animation data. The producer owns the clips and must dispose them after unregistering. Anyo Animation owns mixer/play/stop/crossfade behavior while the registration is active. This is intended for integrations such as VRMA humanoid retargeting without duplicating the renderer animation runtime.

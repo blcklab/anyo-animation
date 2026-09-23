@@ -57,7 +57,7 @@ function createFixture({ ready = true, autoplay = true } = {}) {
     world: { emit(name, payload) { events.push([name, payload]) } },
     renderer: {}, document: {},
     compiled: { entityById: new Map([['hero', entity]]) },
-    transforms: {}, query,
+    transforms: { clear() {} }, query,
   }
   return {
     adapter, binding, calls, events, context,

@@ -49,6 +49,7 @@ export class AnyoAnimationPlugin implements WorldPlugin {
   }
 
   play(...args: Parameters<AnimationController['play']>): ReturnType<AnimationController['play']> { return this.controller.play(...args) }
+  crossFade(...args: Parameters<AnimationController['crossFade']>): ReturnType<AnimationController['crossFade']> { return this.controller.crossFade(...args) }
   transitionTo(...args: Parameters<AnimationController['transitionTo']>): ReturnType<AnimationController['transitionTo']> { return this.controller.transitionTo(...args) }
   pause(...args: Parameters<AnimationController['pause']>): ReturnType<AnimationController['pause']> { return this.controller.pause(...args) }
   resume(...args: Parameters<AnimationController['resume']>): ReturnType<AnimationController['resume']> { return this.controller.resume(...args) }
@@ -100,6 +101,14 @@ export class AnyoAnimationPlugin implements WorldPlugin {
       this.cleanups.push(
         world.registerAction('animation.play', (params) => {
           this.controller.play(requiredEntity(params), requiredString(params.clip, 'clip'), {
+            ...(typeof params.loop === 'string' ? { loop: params.loop as 'once' | 'repeat' | 'ping-pong' } : {}),
+            ...(typeof params.speed === 'number' ? { speed: params.speed } : {}),
+            ...(typeof params.startTime === 'number' ? { startTime: params.startTime } : {}),
+          })
+        }),
+        world.registerAction('animation.crossfade', (params) => {
+          this.controller.crossFade(requiredEntity(params), requiredString(params.clip, 'clip'), {
+            ...(typeof params.duration === 'number' ? { duration: params.duration } : {}),
             ...(typeof params.loop === 'string' ? { loop: params.loop as 'once' | 'repeat' | 'ping-pong' } : {}),
             ...(typeof params.speed === 'number' ? { speed: params.speed } : {}),
             ...(typeof params.startTime === 'number' ? { startTime: params.startTime } : {}),

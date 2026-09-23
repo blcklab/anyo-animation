@@ -4,6 +4,13 @@ import { AnimationParameterStore } from './ParameterStore.js'
 import { animationConfigKey, parseAnimationComponent } from './schema.js'
 import { selectAnimationTransition, transitionTriggerNames } from './state-machine.js'
 import {
+  ANYO_ANIMATION_TRACK_PRIORITY,
+  ANYO_ANIMATION_TRACK_SOURCE,
+  evaluatePropertyTracks,
+  hasPropertyTracks,
+  requiresAnimationBinding,
+} from './property-tracks.js'
+import {
   ANYO_ANIMATION_COMPONENT,
   ANYO_ANIMATION_SNAPSHOT_VERSION,
   type AnimationActionReference,
@@ -53,6 +60,7 @@ interface EntityRecord {
   currentState: string | undefined
   transition: ActiveTransition | undefined
   rootMotion: [number, number, number]
+  trackTime: number
 }
 
 export class AnimationController {
@@ -104,6 +112,7 @@ export class AnimationController {
         const parameterSnapshot = current.parameters.snapshot()
         this.detachBinding(current)
         this.clearRootMotion(current)
+        this.clearPropertyTracks(current)
         current.config = config
         current.configKey = key
         current.status = 'pending'
@@ -114,12 +123,21 @@ export class AnimationController {
           : config.stateMachine?.initial
         current.transition = undefined
         current.rootMotion = [0, 0, 0]
+        current.trackTime = 0
         current.desired = this.initialDesired(config, current.currentState)
         current.activeClip = current.desired.clip
       }
 
       const record = this.records.get(entityId)
-      if (record && !record.binding) this.attach(record, context)
+      if (record) {
+        if (requiresAnimationBinding(record.config)) {
+          if (!record.binding) this.attach(record, context)
+        } else {
+          this.detachBinding(record)
+          record.status = record.desired.state === 'playing' ? 'playing' : record.desired.state === 'stopped' ? 'stopped' : 'ready'
+        }
+        if (record.desired.state === 'playing') this.applyPropertyTracks(record)
+      }
     }
 
     for (const [entityId, record] of this.records) {
@@ -151,6 +169,45 @@ export class AnimationController {
     return true
   }
 
+  crossFade(
+    entityId: string,
+    clip: string,
+    options: { duration?: number; loop?: AnimationLoopMode; speed?: number; startTime?: number } = {},
+  ): boolean {
+    const record = this.requireRecord(entityId)
+    const speed = positiveFinite(options.speed ?? record.config.speed, 'speed')
+    const duration = Math.max(0, Number.isFinite(options.duration) ? Number(options.duration) : 0.2)
+    record.currentState = undefined
+    record.transition = undefined
+    record.desired = {
+      clip,
+      loop: options.loop ?? record.config.loop,
+      speed,
+      state: 'playing',
+      ...(options.startTime !== undefined ? { startTime: nonNegativeFinite(options.startTime, 'startTime') } : {}),
+    }
+    record.activeClip = clip
+    if (!record.binding) return this.queuePending(record, clip)
+    const request = {
+      clip,
+      loop: options.loop ?? record.config.loop,
+      speed,
+      ...(options.startTime !== undefined ? { startTime: nonNegativeFinite(options.startTime, 'startTime') } : {}),
+    }
+    try {
+      if (duration > 0 && record.binding.crossFade) record.binding.crossFade({ ...request, duration })
+      else record.binding.play(request)
+      record.status = 'playing'
+      this.emit('animation:crossfade', { entityId: record.entityId, clip, duration, loop: request.loop, speed })
+      return true
+    } catch (error) {
+      this.report('error', 'ANYO_ANIMATION_CLIP_NOT_FOUND', errorMessage(error), record.entityId, { requestedClip: clip })
+      if (this.options.strict) throw error
+      record.status = 'ready'
+      return false
+    }
+  }
+
   transitionTo(entityId: string, state: string, duration = 0.2): boolean {
     const record = this.requireRecord(entityId)
     const machine = record.config.stateMachine
@@ -167,8 +224,9 @@ export class AnimationController {
   pause(entityId: string): boolean {
     const record = this.requireRecord(entityId)
     record.desired.state = 'paused'
-    if (!record.binding) return false
-    record.binding.pause()
+    const tracks = hasPropertyTracks(record.config)
+    if (!record.binding && !tracks) return false
+    record.binding?.pause()
     record.status = 'paused'
     this.emit('animation:pause', { entityId: record.entityId, clip: record.activeClip })
     return true
@@ -177,10 +235,14 @@ export class AnimationController {
   resume(entityId: string): boolean {
     const record = this.requireRecord(entityId)
     record.desired.state = 'playing'
-    if (!record.binding) return false
-    if (record.activeClip) record.binding.resume()
-    else if (record.currentState) this.enterState(record, record.currentState, 0, record.currentState)
-    else if (record.config.defaultClip) return this.play(record.entityId, record.config.defaultClip)
+    const tracks = hasPropertyTracks(record.config)
+    if (!record.binding && !tracks) return false
+    if (record.binding) {
+      if (record.activeClip) record.binding.resume()
+      else if (record.currentState) this.enterState(record, record.currentState, 0, record.currentState)
+      else if (record.config.defaultClip) return this.play(record.entityId, record.config.defaultClip)
+    }
+    if (tracks) this.applyPropertyTracks(record)
     record.status = 'playing'
     this.emit('animation:resume', { entityId: record.entityId, clip: record.activeClip })
     return true
@@ -190,22 +252,24 @@ export class AnimationController {
     const record = this.requireRecord(entityId)
     record.desired.state = 'stopped'
     record.transition = undefined
-    if (!record.binding) {
-      record.status = 'stopped'
-      return false
-    }
-    record.binding.stop()
+    const active = Boolean(record.binding) || hasPropertyTracks(record.config)
+    record.binding?.stop()
+    record.trackTime = 0
+    this.clearPropertyTracks(record)
     record.status = 'stopped'
     this.emit('animation:stop', { entityId: record.entityId, clip: record.activeClip })
-    return true
+    return active
   }
 
   seek(entityId: string, time: number): boolean {
     const record = this.requireRecord(entityId)
     const resolved = nonNegativeFinite(time, 'time')
     record.desired.startTime = resolved
-    if (!record.binding) return false
-    record.binding.seek(resolved)
+    const tracks = hasPropertyTracks(record.config)
+    if (!record.binding && !tracks) return false
+    if (tracks) record.trackTime = resolved
+    record.binding?.seek(resolved)
+    if (tracks && record.desired.state !== 'stopped') this.applyPropertyTracks(record)
     this.emit('animation:seek', { entityId: record.entityId, time: resolved })
     return true
   }
@@ -282,6 +346,7 @@ export class AnimationController {
       if (!record) continue
       record.parameters.restore(entity.parameters)
       record.rootMotion = [entity.rootMotion[0], entity.rootMotion[1], entity.rootMotion[2]]
+      record.trackTime = nonNegativeFinite(entity.trackTime ?? 0, 'trackTime')
       if (entity.currentState && record.config.stateMachine?.states[entity.currentState]) {
         this.enterState(record, entity.currentState, 0, record.currentState ?? entity.currentState)
       } else if (entity.activeClip) {
@@ -289,6 +354,11 @@ export class AnimationController {
       }
       if (entity.status === 'paused') this.pause(record.entityId)
       else if (entity.status === 'stopped') this.stop(record.entityId)
+      else if (!entity.activeClip && hasPropertyTracks(record.config)) {
+        record.desired.state = 'playing'
+        record.status = 'playing'
+      }
+      if (entity.status !== 'stopped' && hasPropertyTracks(record.config)) this.applyPropertyTracks(record)
     }
   }
 
@@ -314,6 +384,7 @@ export class AnimationController {
       ...(transition ? { transition } : {}),
       parameters: record.parameters.snapshot(),
       rootMotion: Object.freeze([...record.rootMotion]) as readonly [number, number, number],
+      trackTime: record.trackTime,
     })
   }
 
@@ -333,6 +404,10 @@ export class AnimationController {
       } catch (error) {
         this.report('error', 'ANYO_ANIMATION_PARAMETER_VALUE_INVALID', errorMessage(error), record.entityId)
         if (this.options.strict) throw error
+      }
+      if (record.desired.state === 'playing' && hasPropertyTracks(record.config)) {
+        record.trackTime += delta
+        this.applyPropertyTracks(record)
       }
     }
     this.adapter.update?.(delta)
@@ -368,12 +443,13 @@ export class AnimationController {
       binding: null,
       bindingCleanup: null,
       desired,
-      status: 'pending',
+      status: requiresAnimationBinding(config) ? 'pending' : desired.state === 'playing' ? 'playing' : 'ready',
       activeClip: desired.clip,
       parameters: new AnimationParameterStore(config.parameters),
       currentState,
       transition: undefined,
       rootMotion: [0, 0, 0],
+      trackTime: 0,
     }
   }
 
@@ -382,7 +458,7 @@ export class AnimationController {
     const clip = state?.clip ?? config.defaultClip
     return {
       speed: state?.speed ?? config.speed,
-      state: config.autoplay && clip ? 'playing' : 'none',
+      state: config.autoplay && (clip || hasPropertyTracks(config)) ? 'playing' : 'none',
       ...(clip ? { clip } : {}),
       loop: state?.loop ?? config.loop,
       ...(state?.startTime !== undefined ? { startTime: state.startTime } : {}),
@@ -586,6 +662,7 @@ export class AnimationController {
       speed: record.desired.speed,
       ...(time !== undefined ? { time } : {}),
       rootMotion: Object.freeze([...record.rootMotion]) as readonly [number, number, number],
+      trackTime: record.trackTime,
     })
   }
 
@@ -637,7 +714,26 @@ export class AnimationController {
   private disposeRecord(record: EntityRecord): void {
     this.detachBinding(record)
     this.clearRootMotion(record)
+    this.clearPropertyTracks(record)
     record.parameters.dispose()
+  }
+
+  private applyPropertyTracks(record: EntityRecord): void {
+    if (!this.context || !hasPropertyTracks(record.config)) return
+    const entity = this.context.query.entity(record.entityId)
+    if (!entity) return
+    const transform = evaluatePropertyTracks(record.config.tracks ?? [], record.trackTime, entity)
+    if (!transform) return
+    this.context.transforms.set(record.entityId, transform, {
+      source: ANYO_ANIMATION_TRACK_SOURCE,
+      priority: ANYO_ANIMATION_TRACK_PRIORITY,
+      mode: 'override',
+      space: 'local',
+    })
+  }
+
+  private clearPropertyTracks(record: EntityRecord): void {
+    this.context?.transforms.clear(record.entityId, ANYO_ANIMATION_TRACK_SOURCE)
   }
 
   private clearRootMotion(record: EntityRecord): void {
