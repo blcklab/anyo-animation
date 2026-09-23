@@ -6,6 +6,10 @@ import {
   type AnimationConditionOperator,
   type AnimationLoopMode,
   type AnimationMarkerBinding,
+  type AnimationPropertyTrackConfig,
+  type AnimationPropertyTrackEasing,
+  type AnimationPropertyTrackTarget,
+  type AnimationPropertyTrackValue,
   type AnimationParameterDefinition,
   type AnimationParameterDefinitions,
   type AnimationRootMotionConfig,
@@ -17,6 +21,12 @@ import {
 } from './types.js'
 
 const LOOP_MODES = new Set<AnimationLoopMode>(['once', 'repeat', 'ping-pong'])
+const PROPERTY_TRACK_TARGETS = new Set<AnimationPropertyTrackTarget>([
+  'transform.position', 'transform.position.x', 'transform.position.y', 'transform.position.z',
+  'transform.rotation', 'transform.rotation.x', 'transform.rotation.y', 'transform.rotation.z',
+  'transform.scale', 'transform.scale.x', 'transform.scale.y', 'transform.scale.z',
+])
+const PROPERTY_TRACK_EASINGS = new Set<AnimationPropertyTrackEasing>(['linear', 'ease-in', 'ease-out', 'ease-in-out'])
 const ROOT_MOTION_MODES = new Set<AnimationRootMotionMode>([
   'disabled', 'extract-only', 'apply-to-entity', 'apply-to-controller', 'horizontal-only',
 ])
@@ -35,9 +45,10 @@ export function parseAnimationComponent(component: CompiledComponent): Animation
   const stateMachine = readStateMachine(data.stateMachine, clips, parameters)
   const markers = readMarkers(data.markers)
   const rootMotion = readRootMotion(data.rootMotion)
+  const tracks = readPropertyTracks(data.tracks)
 
-  if (autoplay && !defaultClip && !stateMachine) {
-    throw new Error('Enabled autoplay requires a non-empty defaultClip or stateMachine.')
+  if (autoplay && !defaultClip && !stateMachine && tracks.length === 0) {
+    throw new Error('Enabled autoplay requires a non-empty defaultClip, stateMachine, or tracks.')
   }
   if (defaultClip) validateClipReference(defaultClip, clips, 'defaultClip')
 
@@ -51,6 +62,7 @@ export function parseAnimationComponent(component: CompiledComponent): Animation
     ...(stateMachine ? { stateMachine } : {}),
     markers: Object.freeze(markers),
     rootMotion,
+    tracks: Object.freeze(tracks),
   })
 }
 
@@ -234,6 +246,50 @@ function validateCondition(
     throw new Error(`Boolean parameter "${condition.parameter}" requires a boolean condition value.`)
   }
   return Object.freeze(condition)
+}
+
+
+function readPropertyTracks(value: JsonValue | undefined): AnimationPropertyTrackConfig[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error('tracks must be an array.')
+  const claimed = new Set<string>()
+  return value.map((input, index) => {
+    if (!isRecord(input)) throw new Error(`tracks[${index}] must be an object.`)
+    const target = requiredString(input.target, `tracks[${index}].target`) as AnimationPropertyTrackTarget
+    if (!PROPERTY_TRACK_TARGETS.has(target)) throw new Error(`tracks[${index}].target is not supported.`)
+    for (const key of propertyTrackClaims(target)) {
+      if (claimed.has(key)) throw new Error(`tracks[${index}].target overlaps another track at ${key}.`)
+      claimed.add(key)
+    }
+    const from = readPropertyTrackValue(input.from, target, `tracks[${index}].from`)
+    const to = readPropertyTrackValue(input.to, target, `tracks[${index}].to`)
+    const duration = optionalPositiveNumber(input.duration, Number.NaN, `tracks[${index}].duration`)
+    if (!Number.isFinite(duration)) throw new Error(`tracks[${index}].duration is required.`)
+    const loop = input.loop === undefined ? 'once' : optionalLoop(input.loop)
+    const easing = input.easing === undefined ? 'linear' : requiredString(input.easing, `tracks[${index}].easing`) as AnimationPropertyTrackEasing
+    if (!PROPERTY_TRACK_EASINGS.has(easing)) throw new Error(`tracks[${index}].easing is not supported.`)
+    const id = optionalNonEmptyString(input.id, `tracks[${index}].id`) ?? `track:${index}`
+    return Object.freeze({ id, target, from, to, duration, loop, easing })
+  })
+}
+
+function readPropertyTrackValue(
+  value: JsonValue | undefined,
+  target: AnimationPropertyTrackTarget,
+  field: string,
+): AnimationPropertyTrackValue {
+  if (target.split('.').length === 3) return finiteNumber(value, field)
+  if (!Array.isArray(value) || value.length !== 3 || value.some((entry) => typeof entry !== 'number' || !Number.isFinite(entry))) {
+    throw new Error(`${field} must contain three finite numbers.`)
+  }
+  return Object.freeze([value[0], value[1], value[2]]) as readonly [number, number, number]
+}
+
+function propertyTrackClaims(target: AnimationPropertyTrackTarget): readonly string[] {
+  const parts = target.split('.')
+  if (parts.length === 3) return [target]
+  const prefix = target
+  return [`${prefix}.x`, `${prefix}.y`, `${prefix}.z`]
 }
 
 function readMarkers(value: JsonValue | undefined): AnimationMarkerBinding[] {

@@ -25,6 +25,7 @@ export function createAnimationComponentDefinition(
     ...(config.stateMachine ? { stateMachine: toJsonValue(config.stateMachine) } : {}),
     markers: toJsonValue(config.markers),
     rootMotion: toJsonValue(config.rootMotion),
+    ...(config.tracks?.length ? { tracks: toJsonValue(config.tracks) } : {}),
   }
 }
 

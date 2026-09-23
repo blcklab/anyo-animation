@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
-assert.equal(pkg.version, '0.1.2')
+assert.equal(pkg.version, '0.1.3')
 assert.equal(pkg.version.includes('-'), false, 'Stable version must not contain a prerelease identifier.')
 assert.ok(pkg.exports['./sekai64'])
 assert.ok(pkg.exports['./authoring'])

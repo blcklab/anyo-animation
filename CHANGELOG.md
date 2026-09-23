@@ -1,3 +1,16 @@
+## 0.1.2+dev.28 — direct clip crossfade control
+
+- Add `AnimationController.crossFade()` and `plugin.crossFade()` for hosts that dynamically register clips instead of authoring a static state machine.
+- Add host action `animation.crossfade`.
+- Preserve existing state-machine transition crossfades and all stable 0.1.2 contracts.
+
+## 0.1.2+dev.22
+
+- Add `Sekai64AnimationAdapter.registerExternalClips()` so another package can prepare/retarget clips for an already-loaded Sekai64 model while Anyo Animation remains the playback/state owner.
+- External clip registrations are discovered through the renderer's existing primitive node, avoiding a second model load or second animation module.
+- Allow external registrations to provide a pose-restoration callback used before playback and when animation releases the rig.
+- Keep clip ownership with the caller; unregistering only removes the adapter registration and reconciles bindings.
+
 ## 0.1.2
 
 - Added loader-independent Sekai64 animation binding so `anyo.animation` can control compatible animated GLB/VRM runtime models created by another asset loader.
