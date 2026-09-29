@@ -1,3 +1,8 @@
+# 0.1.4
+
+- Expand the Anyo peer contract to the World 0.9 / `0.11.0-rc.x` line after Step 14 compatibility validation.
+- Refresh the development compatibility baseline to `@blcklab/anyo@0.11.0-rc.15` and `@blcklab/sekai64@0.8.0-rc.43`; runtime behavior and exports are unchanged.
+
 ## 0.1.2+dev.28 — direct clip crossfade control
 
 - Add `AnimationController.crossFade()` and `plugin.crossFade()` for hosts that dynamically register clips instead of authoring a static state machine.
